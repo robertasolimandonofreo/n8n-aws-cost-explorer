@@ -19,11 +19,17 @@ export class AwsCostExplorerApi implements ICredentialType {
 			displayName: 'AWS Secret Access Key',
 			name: 'secretAccessKey',
 			type: 'string',
-			typeOptions: {
-				password: true,
-			},
+			typeOptions: { password: true },
 			default: '',
 			required: true,
+		},
+		{
+			displayName: 'Session Token',
+			name: 'sessionToken',
+			type: 'string',
+			typeOptions: { password: true },
+			default: '',
+			description: 'Temporary session token for assumed roles (STS) — leave empty for permanent credentials',
 		},
 		{
 			displayName: 'Region',
@@ -31,7 +37,7 @@ export class AwsCostExplorerApi implements ICredentialType {
 			type: 'string',
 			default: 'us-east-1',
 			required: true,
-			description: 'AWS region where Cost Explorer API is available',
+			description: 'AWS region (Cost Explorer is a global service, us-east-1 is recommended)',
 		},
 	];
-} 
+}

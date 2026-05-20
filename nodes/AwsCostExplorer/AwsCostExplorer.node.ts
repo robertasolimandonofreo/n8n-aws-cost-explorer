@@ -8,6 +8,84 @@ import type {
 
 import { NodeOperationError } from 'n8n-workflow';
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function csvToList(raw: string): string[] {
+	return raw
+		.split(',')
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
+function buildDimensionFilter(key: string, values: string[]): object {
+	return { Dimensions: { Key: key, Values: values } };
+}
+
+function buildTagFilter(key: string, values: string[]): object {
+	return { Tags: { Key: key, Values: values } };
+}
+
+function mergeFilters(conditions: object[]): object | undefined {
+	if (conditions.length === 0) return undefined;
+	if (conditions.length === 1) return conditions[0];
+	return { And: conditions };
+}
+
+/** Collect all pages from a Cost Explorer call that returns NextPageToken */
+async function paginate<T>(
+	fn: (token?: string) => Promise<{ results: T[]; nextToken?: string }>,
+): Promise<T[]> {
+	const all: T[] = [];
+	let token: string | undefined;
+	do {
+		const { results, nextToken } = await fn(token);
+		all.push(...results);
+		token = nextToken;
+	} while (token);
+	return all;
+}
+
+/** Flatten ResultsByTime into simple rows */
+function flattenCostResults(
+	resultsByTime: any[],
+	metrics: string[],
+): IDataObject[] {
+	const rows: IDataObject[] = [];
+	for (const period of resultsByTime) {
+		const base: IDataObject = {
+			start: period.TimePeriod?.Start,
+			end: period.TimePeriod?.End,
+			estimated: period.Estimated ?? false,
+		};
+		if (period.Groups && period.Groups.length > 0) {
+			for (const group of period.Groups) {
+				const row: IDataObject = { ...base, keys: group.Keys };
+				for (const metric of metrics) {
+					const m = group.Metrics?.[metric];
+					if (m) row[`${metric}_amount`] = parseFloat(m.Amount);
+					if (m) row[`${metric}_unit`] = m.Unit;
+				}
+				rows.push(row);
+			}
+		} else {
+			const row: IDataObject = { ...base };
+			for (const metric of metrics) {
+				const m = period.Total?.[metric];
+				if (m) row[`${metric}_amount`] = parseFloat(m.Amount);
+				if (m) row[`${metric}_unit`] = m.Unit;
+			}
+			rows.push(row);
+		}
+	}
+	return rows;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Node definition
+// ─────────────────────────────────────────────────────────────────────────────
+
 export class AwsCostExplorer implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'AWS Cost Explorer',
@@ -16,28 +94,20 @@ export class AwsCostExplorer implements INodeType {
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["resource"] + ": " + $parameter["operation"]}}',
-		description: 'Get cost and usage data from AWS Cost Explorer',
-		defaults: {
-			name: 'AWS Cost Explorer',
-		},
+		description: 'Retrieve cost, usage, anomalies and recommendations from AWS Cost Explorer',
+		defaults: { name: 'AWS Cost Explorer' },
 		inputs: ['main'] as any,
 		outputs: ['main'] as any,
-		credentials: [
-			{
-				name: 'awsCostExplorerApi',
-				required: true,
-			},
-		],
+		credentials: [{ name: 'awsCostExplorerApi', required: true }],
 		properties: [
-			// ----------------------------------------------------------------
-			// Resource
-			// ----------------------------------------------------------------
+			// ── Resource ──────────────────────────────────────────────────────
 			{
 				displayName: 'Resource',
 				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
 				options: [
+					{ name: 'Cost Anomaly Detection',  value: 'anomaly' },
 					{ name: 'Cost and Usage',          value: 'costAndUsage' },
 					{ name: 'Cost Forecast',           value: 'costForecast' },
 					{ name: 'Dimension Values',        value: 'dimensionValues' },
@@ -47,9 +117,7 @@ export class AwsCostExplorer implements INodeType {
 				default: 'costAndUsage',
 			},
 
-			// ----------------------------------------------------------------
-			// Operation — Cost and Usage
-			// ----------------------------------------------------------------
+			// ── Operations ────────────────────────────────────────────────────
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -57,14 +125,10 @@ export class AwsCostExplorer implements INodeType {
 				noDataExpression: true,
 				displayOptions: { show: { resource: ['costAndUsage'] } },
 				options: [
-					{ name: 'Get', value: 'get', description: 'Get cost and usage data', action: 'Get cost and usage data' },
+					{ name: 'Get', value: 'get', action: 'Get cost and usage data' },
 				],
 				default: 'get',
 			},
-
-			// ----------------------------------------------------------------
-			// Operation — Cost Forecast
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -72,14 +136,10 @@ export class AwsCostExplorer implements INodeType {
 				noDataExpression: true,
 				displayOptions: { show: { resource: ['costForecast'] } },
 				options: [
-					{ name: 'Get', value: 'get', description: 'Get cost forecast', action: 'Get cost forecast' },
+					{ name: 'Get', value: 'get', action: 'Get cost forecast' },
 				],
 				default: 'get',
 			},
-
-			// ----------------------------------------------------------------
-			// Operation — Dimension Values
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -87,14 +147,10 @@ export class AwsCostExplorer implements INodeType {
 				noDataExpression: true,
 				displayOptions: { show: { resource: ['dimensionValues'] } },
 				options: [
-					{ name: 'Get', value: 'get', description: 'Get dimension values', action: 'Get dimension values' },
+					{ name: 'Get', value: 'get', action: 'Get dimension values' },
 				],
 				default: 'get',
 			},
-
-			// ----------------------------------------------------------------
-			// Operation — Reserved Instances
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -102,15 +158,12 @@ export class AwsCostExplorer implements INodeType {
 				noDataExpression: true,
 				displayOptions: { show: { resource: ['reservedInstances'] } },
 				options: [
-					{ name: 'Get Utilization', value: 'getUtilization', description: 'Get RI utilization and unused hours', action: 'Get RI utilization' },
-					{ name: 'Get Coverage',    value: 'getCoverage',    description: 'Get percentage of usage covered by RIs', action: 'Get RI coverage' },
+					{ name: 'Get Coverage',        value: 'getCoverage',        action: 'Get RI coverage' },
+					{ name: 'Get Recommendations', value: 'getRecommendations', action: 'Get RI purchase recommendations' },
+					{ name: 'Get Utilization',     value: 'getUtilization',     action: 'Get RI utilization' },
 				],
 				default: 'getUtilization',
 			},
-
-			// ----------------------------------------------------------------
-			// Operation — Savings Plans
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Operation',
 				name: 'operation',
@@ -118,15 +171,27 @@ export class AwsCostExplorer implements INodeType {
 				noDataExpression: true,
 				displayOptions: { show: { resource: ['savingsPlans'] } },
 				options: [
-					{ name: 'Get Utilization', value: 'getUtilization', description: 'Get SP utilization and unused commitment', action: 'Get SP utilization' },
-					{ name: 'Get Coverage',    value: 'getCoverage',    description: 'Get percentage of usage covered by SPs', action: 'Get SP coverage' },
+					{ name: 'Get Coverage',        value: 'getCoverage',        action: 'Get SP coverage' },
+					{ name: 'Get Recommendations', value: 'getRecommendations', action: 'Get SP purchase recommendations' },
+					{ name: 'Get Utilization',     value: 'getUtilization',     action: 'Get SP utilization' },
 				],
 				default: 'getUtilization',
 			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: { show: { resource: ['anomaly'] } },
+				options: [
+					{ name: 'Get Anomalies',       value: 'getAnomalies',      action: 'Get cost anomalies' },
+					{ name: 'Get Monitors',        value: 'getMonitors',       action: 'Get anomaly monitors' },
+					{ name: 'Get Subscriptions',   value: 'getSubscriptions',  action: 'Get anomaly subscriptions' },
+				],
+				default: 'getAnomalies',
+			},
 
-			// ----------------------------------------------------------------
-			// Shared: Start Date / End Date
-			// ----------------------------------------------------------------
+			// ── Shared: Date range ────────────────────────────────────────────
 			{
 				displayName: 'Start Date',
 				name: 'startDate',
@@ -158,9 +223,43 @@ export class AwsCostExplorer implements INodeType {
 				required: true,
 			},
 
-			// ----------------------------------------------------------------
-			// Cost and Usage: Granularity
-			// ----------------------------------------------------------------
+			// ── Anomaly: date range ───────────────────────────────────────────
+			{
+				displayName: 'Start Date',
+				name: 'anomalyStartDate',
+				type: 'string',
+				displayOptions: {
+					show: { resource: ['anomaly'], operation: ['getAnomalies'] },
+				},
+				default: '',
+				placeholder: '2024-01-01',
+				description: 'Anomaly date range start (YYYY-MM-DD)',
+				required: true,
+			},
+			{
+				displayName: 'End Date',
+				name: 'anomalyEndDate',
+				type: 'string',
+				displayOptions: {
+					show: { resource: ['anomaly'], operation: ['getAnomalies'] },
+				},
+				default: '',
+				placeholder: '2024-01-31',
+				description: 'Anomaly date range end (YYYY-MM-DD)',
+				required: true,
+			},
+			{
+				displayName: 'Minimum Impact (USD)',
+				name: 'anomalyMinImpact',
+				type: 'number',
+				displayOptions: {
+					show: { resource: ['anomaly'], operation: ['getAnomalies'] },
+				},
+				default: 0,
+				description: 'Only return anomalies with total impact above this amount in USD (0 = all)',
+			},
+
+			// ── Granularity ───────────────────────────────────────────────────
 			{
 				displayName: 'Granularity',
 				name: 'granularity',
@@ -168,15 +267,11 @@ export class AwsCostExplorer implements INodeType {
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				options: [
 					{ name: 'Daily',   value: 'DAILY' },
-					{ name: 'Monthly', value: 'MONTHLY' },
 					{ name: 'Hourly',  value: 'HOURLY' },
+					{ name: 'Monthly', value: 'MONTHLY' },
 				],
 				default: 'MONTHLY',
 			},
-
-			// ----------------------------------------------------------------
-			// Cost Forecast: Granularity
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Granularity',
 				name: 'granularity',
@@ -188,10 +283,6 @@ export class AwsCostExplorer implements INodeType {
 				],
 				default: 'MONTHLY',
 			},
-
-			// ----------------------------------------------------------------
-			// RI / SP: Granularity
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Granularity',
 				name: 'granularity',
@@ -209,30 +300,25 @@ export class AwsCostExplorer implements INodeType {
 				default: 'MONTHLY',
 			},
 
-			// ----------------------------------------------------------------
-			// Cost and Usage: Metrics
-			// ----------------------------------------------------------------
+			// ── Cost and Usage: Metrics ───────────────────────────────────────
 			{
 				displayName: 'Metrics',
 				name: 'metrics',
 				type: 'multiOptions',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				options: [
-					{ name: 'Amortized Cost',      value: 'AmortizedCost' },
-					{ name: 'Blended Cost',        value: 'BlendedCost' },
-					{ name: 'Net Amortized Cost',  value: 'NetAmortizedCost' },
-					{ name: 'Net Unblended Cost',  value: 'NetUnblendedCost' },
-					{ name: 'Unblended Cost',      value: 'UnblendedCost' },
-					{ name: 'Usage Quantity',      value: 'UsageQuantity' },
+					{ name: 'Amortized Cost',          value: 'AmortizedCost' },
+					{ name: 'Blended Cost',            value: 'BlendedCost' },
+					{ name: 'Net Amortized Cost',      value: 'NetAmortizedCost' },
+					{ name: 'Net Unblended Cost',      value: 'NetUnblendedCost' },
 					{ name: 'Normalized Usage Amount', value: 'NormalizedUsageAmount' },
+					{ name: 'Unblended Cost',          value: 'UnblendedCost' },
+					{ name: 'Usage Quantity',          value: 'UsageQuantity' },
 				],
 				default: ['UnblendedCost'],
-				description: 'Which cost metrics to return. Use Unblended Cost for most cases.',
 			},
 
-			// ----------------------------------------------------------------
-			// Cost Forecast: Metric (single)
-			// ----------------------------------------------------------------
+			// ── Forecast: Metric ──────────────────────────────────────────────
 			{
 				displayName: 'Metric',
 				name: 'forecastMetric',
@@ -248,113 +334,134 @@ export class AwsCostExplorer implements INodeType {
 				default: 'UNBLENDED_COST',
 			},
 
-			// ----------------------------------------------------------------
-			// Cost and Usage: Group By
-			// ----------------------------------------------------------------
+			// ── Cost and Usage: Group By ──────────────────────────────────────
 			{
 				displayName: 'Group By',
 				name: 'groupBy',
 				type: 'options',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				options: [
-					{ name: 'None',              value: 'none' },
-					{ name: 'Service',           value: 'SERVICE' },
-					{ name: 'Linked Account',    value: 'LINKED_ACCOUNT' },
-					{ name: 'Region',            value: 'REGION' },
-					{ name: 'Purchase Type',     value: 'PURCHASE_TYPE' },
-					{ name: 'Instance Type',     value: 'INSTANCE_TYPE' },
-					{ name: 'Usage Type',        value: 'USAGE_TYPE' },
-					{ name: 'Tag',               value: 'TAG' },
+					{ name: 'None',           value: 'none' },
+					{ name: 'Instance Type',  value: 'INSTANCE_TYPE' },
+					{ name: 'Linked Account', value: 'LINKED_ACCOUNT' },
+					{ name: 'Purchase Type',  value: 'PURCHASE_TYPE' },
+					{ name: 'Region',         value: 'REGION' },
+					{ name: 'Service',        value: 'SERVICE' },
+					{ name: 'Tag',            value: 'TAG' },
+					{ name: 'Usage Type',     value: 'USAGE_TYPE' },
 				],
 				default: 'none',
-				description: 'Dimension to group costs by',
+				description: 'Primary dimension to group costs by',
 			},
 			{
-				displayName: 'Tag Key',
-				name: 'tagKey',
+				displayName: 'Tag Key (Group By)',
+				name: 'groupByTagKey',
 				type: 'string',
 				displayOptions: {
-					show: {
-						resource: ['costAndUsage'],
-						operation: ['get'],
-						groupBy: ['TAG'],
-					},
+					show: { resource: ['costAndUsage'], operation: ['get'], groupBy: ['TAG'] },
 				},
 				default: '',
 				placeholder: 'Environment',
-				description: 'Tag key to group costs by (required when Group By = Tag)',
+				description: 'Tag key to group costs by',
 				required: true,
 			},
-
-			// ----------------------------------------------------------------
-			// Cost and Usage: Secondary Group By
-			// ----------------------------------------------------------------
 			{
 				displayName: 'Secondary Group By',
 				name: 'groupBySecondary',
 				type: 'options',
 				displayOptions: {
-					show: {
-						resource: ['costAndUsage'],
-						operation: ['get'],
-					},
-					hide: {
-						groupBy: ['none'],
-					},
+					show: { resource: ['costAndUsage'], operation: ['get'] },
+					hide: { groupBy: ['none'] },
 				},
 				options: [
 					{ name: 'None',           value: 'none' },
-					{ name: 'Service',        value: 'SERVICE' },
+					{ name: 'Instance Type',  value: 'INSTANCE_TYPE' },
 					{ name: 'Linked Account', value: 'LINKED_ACCOUNT' },
-					{ name: 'Region',         value: 'REGION' },
 					{ name: 'Purchase Type',  value: 'PURCHASE_TYPE' },
+					{ name: 'Region',         value: 'REGION' },
+					{ name: 'Service',        value: 'SERVICE' },
 				],
 				default: 'none',
-				description: 'Add a second grouping dimension (max 2 GroupBy supported by AWS)',
+				description: 'Secondary grouping dimension (AWS supports max 2)',
 			},
 
-			// ----------------------------------------------------------------
-			// Cost and Usage: Filters
-			// ----------------------------------------------------------------
+			// ── Cost and Usage: Filters ───────────────────────────────────────
 			{
-				displayName: 'Filter by Service',
+				displayName: 'Filter by Service(s)',
 				name: 'serviceFilter',
 				type: 'string',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				default: '',
-				placeholder: 'Amazon EC2',
-				description: 'Filter by a specific AWS service name. Leave empty for all services.',
+				placeholder: 'Amazon EC2, Amazon S3',
+				description: 'Comma-separated list of AWS service names to filter by',
 			},
 			{
-				displayName: 'Filter by Linked Account',
+				displayName: 'Filter by Linked Account(s)',
 				name: 'linkedAccountFilter',
 				type: 'string',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				default: '',
-				placeholder: '123456789012',
-				description: 'Filter by a specific linked account ID. Leave empty for all accounts.',
+				placeholder: '123456789012, 987654321098',
+				description: 'Comma-separated list of linked account IDs to filter by',
 			},
 			{
-				displayName: 'Filter by Region',
+				displayName: 'Filter by Region(s)',
 				name: 'regionFilter',
 				type: 'string',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				default: '',
-				placeholder: 'us-east-1',
-				description: 'Filter by a specific AWS region. Leave empty for all regions.',
+				placeholder: 'us-east-1, eu-west-1',
+				description: 'Comma-separated list of AWS regions to filter by',
 			},
 			{
-				displayName: 'Exclude Credits',
+				displayName: 'Filter by Tag',
+				name: 'tagFilter',
+				type: 'fixedCollection',
+				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
+				default: {},
+				description: 'Filter by a tag key and one or more values',
+				options: [
+					{
+						name: 'values',
+						displayName: 'Tag Filter',
+						values: [
+							{
+								displayName: 'Tag Key',
+								name: 'key',
+								type: 'string',
+								default: '',
+								placeholder: 'Environment',
+							},
+							{
+								displayName: 'Tag Value(s)',
+								name: 'value',
+								type: 'string',
+								default: '',
+								placeholder: 'production, staging',
+								description: 'Comma-separated tag values',
+							},
+						],
+					},
+				],
+			},
+			{
+				displayName: 'Exclude Credits & Refunds',
 				name: 'excludeCredits',
 				type: 'boolean',
 				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
 				default: false,
-				description: 'Whether to exclude credits, refunds and discounts from the response',
+				description: 'Whether to exclude credits, refunds and discounts from results',
+			},
+			{
+				displayName: 'Format Output',
+				name: 'formatOutput',
+				type: 'boolean',
+				displayOptions: { show: { resource: ['costAndUsage'], operation: ['get'] } },
+				default: false,
+				description: 'Whether to flatten the AWS response into simple rows with numeric amounts',
 			},
 
-			// ----------------------------------------------------------------
-			// Dimension Values: Dimension
-			// ----------------------------------------------------------------
+			// ── Dimension Values ──────────────────────────────────────────────
 			{
 				displayName: 'Dimension',
 				name: 'dimension',
@@ -378,9 +485,7 @@ export class AwsCostExplorer implements INodeType {
 				required: true,
 			},
 
-			// ----------------------------------------------------------------
-			// RI: Group By Service
-			// ----------------------------------------------------------------
+			// ── RI / SP: Group by Service ─────────────────────────────────────
 			{
 				displayName: 'Group By Service',
 				name: 'riGroupByService',
@@ -392,7 +497,124 @@ export class AwsCostExplorer implements INodeType {
 					},
 				},
 				default: true,
-				description: 'Whether to break down RI utilization/coverage by AWS service',
+				description: 'Whether to break down RI data by AWS service',
+			},
+
+			// ── RI Recommendations ────────────────────────────────────────────
+			{
+				displayName: 'Service',
+				name: 'riRecommendationService',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['reservedInstances'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'Amazon EC2',         value: 'Amazon EC2' },
+					{ name: 'Amazon ElastiCache', value: 'Amazon ElastiCache' },
+					{ name: 'Amazon ES',          value: 'Amazon Elasticsearch Service' },
+					{ name: 'Amazon RDS',         value: 'Amazon RDS' },
+					{ name: 'Amazon Redshift',    value: 'Amazon Redshift' },
+				],
+				default: 'Amazon EC2',
+				description: 'AWS service to get RI purchase recommendations for',
+			},
+			{
+				displayName: 'Term',
+				name: 'riTerm',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['reservedInstances'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'One Year',   value: 'ONE_YEAR' },
+					{ name: 'Three Year', value: 'THREE_YEARS' },
+				],
+				default: 'ONE_YEAR',
+			},
+			{
+				displayName: 'Payment Option',
+				name: 'riPaymentOption',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['reservedInstances'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'All Upfront',     value: 'ALL_UPFRONT' },
+					{ name: 'No Upfront',      value: 'NO_UPFRONT' },
+					{ name: 'Partial Upfront', value: 'PARTIAL_UPFRONT' },
+				],
+				default: 'NO_UPFRONT',
+			},
+			{
+				displayName: 'Lookback Period',
+				name: 'riLookbackPeriod',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['reservedInstances'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: '7 Days',  value: 'SEVEN_DAYS' },
+					{ name: '30 Days', value: 'THIRTY_DAYS' },
+					{ name: '60 Days', value: 'SIXTY_DAYS' },
+				],
+				default: 'THIRTY_DAYS',
+			},
+
+			// ── SP Recommendations ────────────────────────────────────────────
+			{
+				displayName: 'Savings Plans Type',
+				name: 'spType',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['savingsPlans'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'Compute Savings Plans',              value: 'COMPUTE_SP' },
+					{ name: 'EC2 Instance Savings Plans',        value: 'EC2_INSTANCE_SP' },
+					{ name: 'SageMaker Savings Plans',           value: 'SAGEMAKER_SP' },
+				],
+				default: 'COMPUTE_SP',
+			},
+			{
+				displayName: 'Term',
+				name: 'spTerm',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['savingsPlans'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'One Year',   value: 'ONE_YEAR' },
+					{ name: 'Three Year', value: 'THREE_YEARS' },
+				],
+				default: 'ONE_YEAR',
+			},
+			{
+				displayName: 'Payment Option',
+				name: 'spPaymentOption',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['savingsPlans'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: 'All Upfront',     value: 'ALL_UPFRONT' },
+					{ name: 'No Upfront',      value: 'NO_UPFRONT' },
+					{ name: 'Partial Upfront', value: 'PARTIAL_UPFRONT' },
+				],
+				default: 'NO_UPFRONT',
+			},
+			{
+				displayName: 'Lookback Period',
+				name: 'spLookbackPeriod',
+				type: 'options',
+				displayOptions: {
+					show: { resource: ['savingsPlans'], operation: ['getRecommendations'] },
+				},
+				options: [
+					{ name: '7 Days',  value: 'SEVEN_DAYS' },
+					{ name: '30 Days', value: 'THIRTY_DAYS' },
+					{ name: '60 Days', value: 'SIXTY_DAYS' },
+				],
+				default: 'THIRTY_DAYS',
 			},
 		],
 	};
@@ -400,7 +622,6 @@ export class AwsCostExplorer implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: IDataObject[] = [];
-
 		const credentials = await this.getCredentials('awsCostExplorerApi');
 
 		const {
@@ -410,8 +631,13 @@ export class AwsCostExplorer implements INodeType {
 			GetDimensionValuesCommand,
 			GetReservationUtilizationCommand,
 			GetReservationCoverageCommand,
+			GetReservationPurchaseRecommendationCommand,
 			GetSavingsPlansUtilizationCommand,
 			GetSavingsPlansCoverageCommand,
+			GetSavingsPlansPurchaseRecommendationCommand,
+			GetAnomaliesCommand,
+			GetAnomalyMonitorsCommand,
+			GetAnomalySubscriptionsCommand,
 		} = await import('@aws-sdk/client-cost-explorer');
 
 		const client = new CostExplorerClient({
@@ -419,7 +645,9 @@ export class AwsCostExplorer implements INodeType {
 			credentials: {
 				accessKeyId: credentials.accessKeyId as string,
 				secretAccessKey: credentials.secretAccessKey as string,
-				...(credentials.sessionToken ? { sessionToken: credentials.sessionToken as string } : {}),
+				...(credentials.sessionToken
+					? { sessionToken: credentials.sessionToken as string }
+					: {}),
 			},
 		});
 
@@ -427,173 +655,256 @@ export class AwsCostExplorer implements INodeType {
 			try {
 				const resource  = this.getNodeParameter('resource', i) as string;
 				const operation = this.getNodeParameter('operation', i) as string;
-				const startDate = this.getNodeParameter('startDate', i, '') as string;
-				const endDate   = this.getNodeParameter('endDate', i, '') as string;
 
-				// ----------------------------------------------------------------
-				// Cost and Usage
-				// ----------------------------------------------------------------
+				// ── Cost and Usage ─────────────────────────────────────────────
 				if (resource === 'costAndUsage' && operation === 'get') {
-					const granularity       = this.getNodeParameter('granularity', i) as string;
-					const metrics           = this.getNodeParameter('metrics', i) as string[];
-					const groupBy           = this.getNodeParameter('groupBy', i) as string;
-					const groupBySecondary  = this.getNodeParameter('groupBySecondary', i, 'none') as string;
-					const tagKey            = this.getNodeParameter('tagKey', i, '') as string;
-					const serviceFilter     = this.getNodeParameter('serviceFilter', i, '') as string;
-					const linkedAccountFilter = this.getNodeParameter('linkedAccountFilter', i, '') as string;
-					const regionFilter      = this.getNodeParameter('regionFilter', i, '') as string;
-					const excludeCredits    = this.getNodeParameter('excludeCredits', i, false) as boolean;
+					const startDate     = this.getNodeParameter('startDate', i) as string;
+					const endDate       = this.getNodeParameter('endDate', i) as string;
+					const granularity   = this.getNodeParameter('granularity', i) as string;
+					const metrics       = this.getNodeParameter('metrics', i) as string[];
+					const groupBy       = this.getNodeParameter('groupBy', i) as string;
+					const groupByTagKey = this.getNodeParameter('groupByTagKey', i, '') as string;
+					const groupBySec    = this.getNodeParameter('groupBySecondary', i, 'none') as string;
+					const svcRaw        = this.getNodeParameter('serviceFilter', i, '') as string;
+					const accRaw        = this.getNodeParameter('linkedAccountFilter', i, '') as string;
+					const regRaw        = this.getNodeParameter('regionFilter', i, '') as string;
+					const tagFilter     = this.getNodeParameter('tagFilter', i, {}) as IDataObject;
+					const excludeCredits = this.getNodeParameter('excludeCredits', i, false) as boolean;
+					const formatOutput  = this.getNodeParameter('formatOutput', i, false) as boolean;
 
-					const params: any = {
-						TimePeriod: { Start: startDate, End: endDate },
-						Granularity: granularity,
-						Metrics: metrics,
-					};
-
-					// Group By
+					// GroupBy
 					const groupByList: any[] = [];
 					if (groupBy !== 'none') {
 						groupByList.push({
 							Type: groupBy === 'TAG' ? 'TAG' : 'DIMENSION',
-							Key: groupBy === 'TAG' ? tagKey : groupBy,
+							Key: groupBy === 'TAG' ? groupByTagKey : groupBy,
 						});
 					}
-					if (groupBySecondary !== 'none') {
-						groupByList.push({ Type: 'DIMENSION', Key: groupBySecondary });
-					}
-					if (groupByList.length > 0) {
-						params.GroupBy = groupByList;
+					if (groupBySec !== 'none') {
+						groupByList.push({ Type: 'DIMENSION', Key: groupBySec });
 					}
 
-					// Filters — AND together when multiple are set
-					const filterConditions: any[] = [];
+					// Filters
+					const filterConditions: object[] = [];
+					const svcList = csvToList(svcRaw);
+					const accList = csvToList(accRaw);
+					const regList = csvToList(regRaw);
 
-					if (serviceFilter?.trim()) {
-						filterConditions.push({
-							Dimensions: { Key: 'SERVICE', Values: [serviceFilter.trim()] },
-						});
+					if (svcList.length) filterConditions.push(buildDimensionFilter('SERVICE', svcList));
+					if (accList.length) filterConditions.push(buildDimensionFilter('LINKED_ACCOUNT', accList));
+					if (regList.length) filterConditions.push(buildDimensionFilter('REGION', regList));
+
+					const tagValues = (tagFilter as any)?.values;
+					if (tagValues?.key && tagValues?.value) {
+						filterConditions.push(buildTagFilter(tagValues.key, csvToList(tagValues.value)));
 					}
-					if (linkedAccountFilter?.trim()) {
-						filterConditions.push({
-							Dimensions: { Key: 'LINKED_ACCOUNT', Values: [linkedAccountFilter.trim()] },
-						});
-					}
-					if (regionFilter?.trim()) {
-						filterConditions.push({
-							Dimensions: { Key: 'REGION', Values: [regionFilter.trim()] },
-						});
-					}
+
 					if (excludeCredits) {
 						filterConditions.push({
-							Not: {
-								Dimensions: {
-									Key: 'RECORD_TYPE',
-									Values: ['Credit', 'Refund', 'Discount'],
-								},
-							},
+							Not: { Dimensions: { Key: 'RECORD_TYPE', Values: ['Credit', 'Refund', 'Discount'] } },
 						});
 					}
 
-					if (filterConditions.length === 1) {
-						params.Filter = filterConditions[0];
-					} else if (filterConditions.length > 1) {
-						params.Filter = { And: filterConditions };
-					}
+					// Paginate
+					const allPeriods = await paginate(async (token) => {
+						const params: any = {
+							TimePeriod: { Start: startDate, End: endDate },
+							Granularity: granularity,
+							Metrics: metrics,
+							...(groupByList.length ? { GroupBy: groupByList } : {}),
+							...(filterConditions.length ? { Filter: mergeFilters(filterConditions) } : {}),
+							...(token ? { NextPageToken: token } : {}),
+						};
+						const resp = await client.send(new GetCostAndUsageCommand(params));
+						return {
+							results: resp.ResultsByTime ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
 
-					const response = await client.send(new GetCostAndUsageCommand(params));
-					returnData.push(response as unknown as IDataObject);
+					if (formatOutput) {
+						returnData.push(...(flattenCostResults(allPeriods, metrics) as IDataObject[]));
+					} else {
+						returnData.push({ ResultsByTime: allPeriods } as IDataObject);
+					}
 				}
 
-				// ----------------------------------------------------------------
-				// Cost Forecast
-				// ----------------------------------------------------------------
-				if (resource === 'costForecast' && operation === 'get') {
-					const granularity    = this.getNodeParameter('granularity', i) as string;
+				// ── Cost Forecast ──────────────────────────────────────────────
+				else if (resource === 'costForecast' && operation === 'get') {
+					const startDate     = this.getNodeParameter('startDate', i) as string;
+					const endDate       = this.getNodeParameter('endDate', i) as string;
+					const granularity   = this.getNodeParameter('granularity', i) as string;
 					const forecastMetric = this.getNodeParameter('forecastMetric', i) as string;
 
-					const response = await client.send(new GetCostForecastCommand({
+					const resp = await client.send(new GetCostForecastCommand({
 						TimePeriod: { Start: startDate, End: endDate },
 						Granularity: granularity as any,
 						Metric: forecastMetric as any,
 					}));
-					returnData.push(response as unknown as IDataObject);
+					returnData.push(resp as unknown as IDataObject);
 				}
 
-				// ----------------------------------------------------------------
-				// Dimension Values
-				// ----------------------------------------------------------------
-				if (resource === 'dimensionValues' && operation === 'get') {
+				// ── Dimension Values ───────────────────────────────────────────
+				else if (resource === 'dimensionValues' && operation === 'get') {
+					const startDate = this.getNodeParameter('startDate', i) as string;
+					const endDate   = this.getNodeParameter('endDate', i) as string;
 					const dimension = this.getNodeParameter('dimension', i) as string;
 
-					const response = await client.send(new GetDimensionValuesCommand({
-						TimePeriod: { Start: startDate, End: endDate },
-						Dimension: dimension as any,
-					}));
-					returnData.push(response as unknown as IDataObject);
+					const allValues = await paginate(async (token) => {
+						const resp = await client.send(new GetDimensionValuesCommand({
+							TimePeriod: { Start: startDate, End: endDate },
+							Dimension: dimension as any,
+							...(token ? { NextPageToken: token } : {}),
+						}));
+						return {
+							results: resp.DimensionValues ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
+					returnData.push({ DimensionValues: allValues } as IDataObject);
 				}
 
-				// ----------------------------------------------------------------
-				// Reserved Instances — Utilization
-				// ----------------------------------------------------------------
-				if (resource === 'reservedInstances' && operation === 'getUtilization') {
-					const granularity      = this.getNodeParameter('granularity', i) as string;
+				// ── Reserved Instances: Utilization ────────────────────────────
+				else if (resource === 'reservedInstances' && operation === 'getUtilization') {
+					const startDate       = this.getNodeParameter('startDate', i) as string;
+					const endDate         = this.getNodeParameter('endDate', i) as string;
+					const granularity     = this.getNodeParameter('granularity', i) as string;
 					const riGroupByService = this.getNodeParameter('riGroupByService', i, true) as boolean;
 
-					const params: any = {
+					const resp = await client.send(new GetReservationUtilizationCommand({
 						TimePeriod: { Start: startDate, End: endDate },
 						Granularity: granularity as any,
-					};
-					if (riGroupByService) {
-						params.GroupBy = [{ Type: 'DIMENSION', Key: 'SERVICE' }];
-					}
-
-					const response = await client.send(new GetReservationUtilizationCommand(params));
-					returnData.push(response as unknown as IDataObject);
+						...(riGroupByService ? { GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }] } : {}),
+					}));
+					returnData.push(resp as unknown as IDataObject);
 				}
 
-				// ----------------------------------------------------------------
-				// Reserved Instances — Coverage
-				// ----------------------------------------------------------------
-				if (resource === 'reservedInstances' && operation === 'getCoverage') {
-					const granularity      = this.getNodeParameter('granularity', i) as string;
+				// ── Reserved Instances: Coverage ───────────────────────────────
+				else if (resource === 'reservedInstances' && operation === 'getCoverage') {
+					const startDate       = this.getNodeParameter('startDate', i) as string;
+					const endDate         = this.getNodeParameter('endDate', i) as string;
+					const granularity     = this.getNodeParameter('granularity', i) as string;
 					const riGroupByService = this.getNodeParameter('riGroupByService', i, true) as boolean;
 
-					const params: any = {
+					const resp = await client.send(new GetReservationCoverageCommand({
 						TimePeriod: { Start: startDate, End: endDate },
 						Granularity: granularity as any,
-					};
-					if (riGroupByService) {
-						params.GroupBy = [{ Type: 'DIMENSION', Key: 'SERVICE' }];
-					}
-
-					const response = await client.send(new GetReservationCoverageCommand(params));
-					returnData.push(response as unknown as IDataObject);
+						...(riGroupByService ? { GroupBy: [{ Type: 'DIMENSION', Key: 'SERVICE' }] } : {}),
+					}));
+					returnData.push(resp as unknown as IDataObject);
 				}
 
-				// ----------------------------------------------------------------
-				// Savings Plans — Utilization
-				// ----------------------------------------------------------------
-				if (resource === 'savingsPlans' && operation === 'getUtilization') {
+				// ── Reserved Instances: Recommendations ────────────────────────
+				else if (resource === 'reservedInstances' && operation === 'getRecommendations') {
+					const service       = this.getNodeParameter('riRecommendationService', i) as string;
+					const term          = this.getNodeParameter('riTerm', i) as string;
+					const paymentOption = this.getNodeParameter('riPaymentOption', i) as string;
+					const lookback      = this.getNodeParameter('riLookbackPeriod', i) as string;
+
+					const allRecs = await paginate(async (token) => {
+						const resp = await client.send(new GetReservationPurchaseRecommendationCommand({
+							Service: service,
+							TermInYears: term as any,
+							PaymentOption: paymentOption as any,
+							LookbackPeriodInDays: lookback as any,
+							...(token ? { NextPageToken: token } : {}),
+						}));
+						return {
+							results: resp.Recommendations ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
+					returnData.push({ Recommendations: allRecs } as IDataObject);
+				}
+
+				// ── Savings Plans: Utilization ─────────────────────────────────
+				else if (resource === 'savingsPlans' && operation === 'getUtilization') {
+					const startDate   = this.getNodeParameter('startDate', i) as string;
+					const endDate     = this.getNodeParameter('endDate', i) as string;
 					const granularity = this.getNodeParameter('granularity', i) as string;
 
-					const response = await client.send(new GetSavingsPlansUtilizationCommand({
+					const resp = await client.send(new GetSavingsPlansUtilizationCommand({
 						TimePeriod: { Start: startDate, End: endDate },
 						Granularity: granularity as any,
 					}));
-					returnData.push(response as unknown as IDataObject);
+					returnData.push(resp as unknown as IDataObject);
 				}
 
-				// ----------------------------------------------------------------
-				// Savings Plans — Coverage
-				// ----------------------------------------------------------------
-				if (resource === 'savingsPlans' && operation === 'getCoverage') {
+				// ── Savings Plans: Coverage ────────────────────────────────────
+				else if (resource === 'savingsPlans' && operation === 'getCoverage') {
+					const startDate   = this.getNodeParameter('startDate', i) as string;
+					const endDate     = this.getNodeParameter('endDate', i) as string;
 					const granularity = this.getNodeParameter('granularity', i) as string;
 
-					const response = await client.send(new GetSavingsPlansCoverageCommand({
+					const resp = await client.send(new GetSavingsPlansCoverageCommand({
 						TimePeriod: { Start: startDate, End: endDate },
 						Granularity: granularity as any,
 					}));
-					returnData.push(response as unknown as IDataObject);
+					returnData.push(resp as unknown as IDataObject);
+				}
+
+				// ── Savings Plans: Recommendations ─────────────────────────────
+				else if (resource === 'savingsPlans' && operation === 'getRecommendations') {
+					const spType        = this.getNodeParameter('spType', i) as string;
+					const term          = this.getNodeParameter('spTerm', i) as string;
+					const paymentOption = this.getNodeParameter('spPaymentOption', i) as string;
+					const lookback      = this.getNodeParameter('spLookbackPeriod', i) as string;
+
+					const resp = await client.send(new GetSavingsPlansPurchaseRecommendationCommand({
+						SavingsPlansType: spType as any,
+						TermInYears: term as any,
+						PaymentOption: paymentOption as any,
+						LookbackPeriodInDays: lookback as any,
+					}));
+					returnData.push(resp as unknown as IDataObject);
+				}
+
+				// ── Anomaly Detection: Get Anomalies ───────────────────────────
+				else if (resource === 'anomaly' && operation === 'getAnomalies') {
+					const startDate    = this.getNodeParameter('anomalyStartDate', i) as string;
+					const endDate      = this.getNodeParameter('anomalyEndDate', i) as string;
+					const minImpact    = this.getNodeParameter('anomalyMinImpact', i, 0) as number;
+
+					const allAnomalies = await paginate(async (token) => {
+						const resp = await client.send(new GetAnomaliesCommand({
+							DateInterval: { StartDate: startDate, EndDate: endDate },
+							...(minImpact > 0 ? { TotalImpact: { NumericOperator: 'GREATER_THAN_OR_EQUAL', StartValue: minImpact } } : {}),
+							...(token ? { NextPageToken: token } : {}),
+						}));
+						return {
+							results: resp.Anomalies ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
+					returnData.push({ Anomalies: allAnomalies } as IDataObject);
+				}
+
+				// ── Anomaly Detection: Get Monitors ────────────────────────────
+				else if (resource === 'anomaly' && operation === 'getMonitors') {
+					const allMonitors = await paginate(async (token) => {
+						const resp = await client.send(new GetAnomalyMonitorsCommand({
+							...(token ? { NextPageToken: token } : {}),
+						}));
+						return {
+							results: resp.AnomalyMonitors ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
+					returnData.push({ AnomalyMonitors: allMonitors } as IDataObject);
+				}
+
+				// ── Anomaly Detection: Get Subscriptions ───────────────────────
+				else if (resource === 'anomaly' && operation === 'getSubscriptions') {
+					const allSubs = await paginate(async (token) => {
+						const resp = await client.send(new GetAnomalySubscriptionsCommand({
+							...(token ? { NextPageToken: token } : {}),
+						}));
+						return {
+							results: resp.AnomalySubscriptions ?? [],
+							nextToken: resp.NextPageToken,
+						};
+					});
+					returnData.push({ AnomalySubscriptions: allSubs } as IDataObject);
 				}
 
 			} catch (error) {

@@ -1,67 +1,98 @@
 # n8n-nodes-aws-cost-explorer
 
-This is an n8n community node that lets you retrieve cost and usage data from AWS Cost Explorer in your n8n workflows.
-
-[n8n](https://n8n.io/) is a [fair-code licensed](https://docs.n8n.io/reference/license/) workflow automation platform.
+n8n community node for AWS Cost Explorer — retrieve cost, usage, anomalies, and purchase recommendations.
 
 ## Installation
 
-Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes/installation/) in the n8n community nodes documentation.
-
-To install via n8n settings:
-1. Go to Settings > Community Nodes
-2. Click "Install Community Node"
-3. Enter `n8n-nodes-aws-cost-explorer-rsd`
-4. Click Install
-
-## Prerequisites
-
-You need:
-- AWS account with Cost Explorer enabled
-- AWS IAM user/role with Cost Explorer permissions
-- AWS Access Key ID and Secret Access Key
+Settings → Community Nodes → Install → `n8n-nodes-aws-cost-explorer-rsd`
 
 ## Credentials
 
-This node requires AWS Cost Explorer API credentials:
-- **AWS Access Key ID**: Your AWS access key
-- **AWS Secret Access Key**: Your AWS secret key
-- **Region**: AWS region (usually us-east-1 for Cost Explorer)
+| Field | Required | Description |
+|---|---|---|
+| AWS Access Key ID | ✅ | IAM access key |
+| AWS Secret Access Key | ✅ | IAM secret key |
+| Session Token | ❌ | STS temporary token (for AssumeRole) |
+| Region | ✅ | `us-east-1` recommended |
 
-Required IAM permissions:
+## IAM Policy
+
 ```json
 {
-    "Version": "2012-10-17",
-    "Statement": [
-        {
-            "Effect": "Allow",
-            "Action": [
-                "ce:GetCostAndUsage",
-                "ce:GetDimensionValues"
-            ],
-            "Resource": "*"
-        }
-    ]
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ce:GetCostAndUsage",
+      "ce:GetCostForecast",
+      "ce:GetDimensionValues",
+      "ce:GetReservationUtilization",
+      "ce:GetReservationCoverage",
+      "ce:GetReservationPurchaseRecommendation",
+      "ce:GetSavingsPlansUtilization",
+      "ce:GetSavingsPlansCoverage",
+      "ce:GetSavingsPlansPurchaseRecommendation",
+      "ce:GetAnomalies",
+      "ce:GetAnomalyMonitors",
+      "ce:GetAnomalySubscriptions"
+    ],
+    "Resource": "*"
+  }]
 }
 ```
 
-## Operations
+## Resources & Operations
 
 ### Cost and Usage
-- **Get**: Retrieve cost and usage data for a specified time period
+- **Get** — Retrieves cost and usage data for a time period.
 
-### Dimension Values  
-- **Get**: Get available values for AWS cost dimensions (Service, Account, Instance Type, Region)
+Options:
+- **Granularity**: Daily / Monthly / Hourly
+- **Metrics**: UnblendedCost, BlendedCost, AmortizedCost, NetUnblendedCost, NetAmortizedCost, UsageQuantity, NormalizedUsageAmount
+- **Group By**: Service, Linked Account, Region, Purchase Type, Instance Type, Usage Type, Tag
+- **Secondary Group By**: additional grouping dimension (max 2 supported by AWS)
+- **Filter by Service(s)**: comma-separated list (e.g. `Amazon EC2, Amazon S3`)
+- **Filter by Linked Account(s)**: comma-separated account IDs
+- **Filter by Region(s)**: comma-separated region codes
+- **Filter by Tag**: key + comma-separated values
+- **Exclude Credits & Refunds**: removes Credit/Refund/Discount record types
+- **Format Output**: flattens AWS response into simple rows with numeric amounts
+- **Pagination**: automatic — all pages are fetched and merged
 
-## Usage Example
+### Cost Forecast
+- **Get** — Retrieves cost forecast for a future time period.
 
-1. Add AWS Cost Explorer node to your workflow
-2. Configure credentials
-3. Select "Cost and Usage" > "Get"
-4. Set start/end dates (YYYY-MM-DD format)
-5. Choose granularity (Daily/Monthly/Hourly)
-6. Select metrics (Blended Cost, Unblended Cost, Usage Quantity)
+### Dimension Values
+- **Get** — Lists available values for a dimension (Service, Region, Linked Account, etc.)
 
-## License
+### Reserved Instances
+- **Get Utilization** — RI hours used vs purchased, grouped by service (optional)
+- **Get Coverage** — % of usage covered by RIs
+- **Get Recommendations** — Purchase recommendations for EC2, RDS, ElastiCache, Redshift, ES
 
-[MIT](https://github.com/n8n-io/n8n-nodes-starter/blob/master/LICENSE.md) 
+### Savings Plans
+- **Get Utilization** — SP commitment used vs wasted
+- **Get Coverage** — % of usage covered by SPs
+- **Get Recommendations** — Purchase recommendations for Compute SP, EC2 Instance SP, SageMaker SP
+
+### Cost Anomaly Detection
+- **Get Anomalies** — Detected cost spikes with optional minimum impact filter
+- **Get Monitors** — Configured anomaly monitors
+- **Get Subscriptions** — Alert subscriptions for anomaly notifications
+
+## Output Format
+
+By default the node returns the raw AWS API response.
+
+When **Format Output** is enabled on `Cost and Usage`, results are flattened into one row per group per period:
+
+```json
+{
+  "start": "2024-01-01",
+  "end": "2024-01-02",
+  "estimated": false,
+  "keys": ["Amazon EC2"],
+  "UnblendedCost_amount": 42.5,
+  "UnblendedCost_unit": "USD"
+}
+```
