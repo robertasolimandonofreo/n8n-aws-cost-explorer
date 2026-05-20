@@ -14,15 +14,6 @@ To install via n8n settings:
 3. Enter `@roberta.soliman/n8n-nodes-aws-cost-explorer`
 4. Click Install
 
-## Publish (maintainer)
-
-1. Create an [npm access token](https://www.npmjs.com/settings/~your-user/tokens) (type **Automation**).
-2. In GitHub: **Settings → Secrets and variables → Actions** → add `NPM_TOKEN` with that token.
-3. Bump `version` in `package.json`, commit, push.
-4. Create a [GitHub Release](https://github.com/robertasolimandonofreo/n8n-aws-cost-explorer/releases/new) (tag `v0.1.2` matching the version in `package.json`).
-
-The workflow [publish-npm.yml](.github/workflows/publish-npm.yml) runs on release publish and pushes the package to npm. You can also run it manually from **Actions → Publish to npm → Run workflow**.
-
 ## Prerequisites
 
 You need:
