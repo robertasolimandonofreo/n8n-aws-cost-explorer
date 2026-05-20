@@ -1,6 +1,6 @@
 {
-    "name": "@roberta.soliman/n8n-nodes-aws-cost-explorer",
-    "version": "0.1.2",
+    "name": "n8n-nodes-aws-cost-explorer-rsd",
+    "version": "0.1.0",
     "description": "N8N node for AWS Cost Explorer to retrieve cost and usage data",
     "keywords": [
         "n8n-community-node-package",
@@ -10,9 +10,6 @@
         "cost-management"
     ],
     "license": "MIT",
-    "publishConfig": {
-        "access": "public"
-    },
     "homepage": "https://github.com/robertasolimandonofreo/n8n-aws-cost-explorer",
     "author": {
         "name": "roberta.soliman"
@@ -21,7 +18,6 @@
         "type": "git",
         "url": "https://github.com/robertasolimandonofreo/n8n-aws-cost-explorer.git"
     },
-    "main": "index.js",
     "scripts": {
         "build": "tsc --noEmit false --skipLibCheck && gulp build:icons",
         "dev": "tsc --watch",
@@ -41,6 +37,9 @@
         "nodes": [
             "dist/nodes/AwsCostExplorer/AwsCostExplorer.node.js"
         ]
+    },
+    "peerDependencies": {
+        "n8n-workflow": "*"
     },
     "devDependencies": {
         "@types/node": "^18.16.16",

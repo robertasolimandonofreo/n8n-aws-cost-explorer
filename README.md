@@ -11,7 +11,7 @@ Follow the [installation guide](https://docs.n8n.io/integrations/community-nodes
 To install via n8n settings:
 1. Go to Settings > Community Nodes
 2. Click "Install Community Node"
-3. Enter `@roberta.soliman/n8n-nodes-aws-cost-explorer`
+3. Enter `n8n-nodes-aws-cost-explorer-rsd`
 4. Click Install
 
 ## Prerequisites
